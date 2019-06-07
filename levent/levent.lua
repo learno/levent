@@ -17,18 +17,11 @@ function levent.now()
 end
 
 function levent.sleep(sec)
-    if sec <= 0 then
-        local waiter = hub:waiter()
-        hub.loop:run_callback(waiter.switch, waiter)
-        waiter:get()
-    else
-        hub:wait(hub.loop:timer(sec))
+    if sec < 0 then
+        sec = 0
     end
-end
 
-local function assert_resume(co, ...)
-    local ok, msg = coroutine.resume(co, ...)
-    assert(ok, msg)
+    hub:wait(hub.loop:timer(sec))
 end
 
 local stats = {
@@ -57,7 +50,7 @@ levent.check_coroutine = coroutines.check
 
 function levent.spawn(f, ...)
     local co = coroutines.create(f)
-    hub.loop:run_callback(assert_resume, co, ...)
+    hub.loop:run_callback(coroutines.resume, co, ...)
     return co
 end
 

@@ -75,8 +75,101 @@ local exceptions = require "levent.exceptions"
 local pack = string.pack
 local unpack = string.unpack
 
-local dns_host = "223.5.5.5"
+local dns = {}
+dns.DEFAULT_HOSTS = "/etc/hosts"
+dns.DEFAULT_RESOLV_CONF = "/etc/resolv.conf"
+
+-- local hosts
+local local_hosts
+
+-- dns server address
+local dns_host
 local dns_port = 53
+
+-- return name type: 'ipv4', 'ipv6', or 'hostname'
+local function guess_name_type(name)
+    if name:match("^[%d%.]+$") then
+        return "ipv4"
+    end
+
+    if name:find(":") then
+        return "ipv6"
+    end
+
+    return "hostname"
+end
+
+-- http://man7.org/linux/man-pages/man5/hosts.5.html
+local function parse_hosts()
+    if not dns.DEFAULT_HOSTS then
+        return
+    end
+
+    local f = io.open(dns.DEFAULT_HOSTS)
+    if not f then
+        return
+    end
+
+    local rts = {}
+    for line in f:lines() do
+        local ip, hosts = string.match(line, "^%s*([%[%]%x%.%:]+)%s+([^#;]*)")
+        local family = guess_name_type(ip)
+        if hosts and family ~= "hostname" then
+            for host in hosts:gmatch("%S+") do
+                host = host:lower()
+                local rt = rts[host]
+                if not rt then
+                    rt = {}
+                    rts[host] = rt
+                end
+
+                if not rt[family] then
+                    rt[family] = {}
+                end
+                table.insert(rt[family], ip)
+            end
+        end
+    end
+    return rts
+end
+
+local function get_hosts()
+    if not local_hosts then
+        local_hosts = parse_hosts()
+    end
+
+    return local_hosts
+end
+
+-- http://man7.org/linux/man-pages/man5/resolv.conf.5.html
+local function parse_resolv_conf()
+    if not dns.DEFAULT_RESOLV_CONF then
+        return
+    end
+
+    local f = io.open(dns.DEFAULT_RESOLV_CONF)
+    if not f then
+        return
+    end
+
+    local server
+    for line in f:lines() do
+        server = line:match("%s*nameserver%s+([^#;%s]+)")
+        if server then
+            break
+        end
+    end
+    f:close()
+    return server
+end
+
+local function get_nameserver()
+    if not dns_host then
+        dns_host = assert(parse_resolv_conf(), "parse resolve conf failed")
+    end
+    return dns_host, dns_port
+end
+
 
 local MAX_DOMAIN_LEN = 1024
 local MAX_LABEL_LEN = 63
@@ -202,7 +295,8 @@ local function request(chunk, timeout)
         sock:set_timeout(timeout)
     end
 
-    local ok, err = sock:connect(dns_host, dns_port)
+    local host, port = get_nameserver()
+    local ok, err = sock:connect(host, port)
     if not ok then
         return nil, err
     end
@@ -277,9 +371,20 @@ local function is_valid_hostname(name)
     return true
 end
 
-local function dns_resolve(name, ipv6, timeout)
+-- parse local hosts
+local function local_resolve(name, ipv6)
+    local hosts = get_hosts()
+    local family = ipv6 and "ipv6" or "ipv4"
+
+    local t = hosts[name]
+    if t then
+        return t[family]
+    end
+    return nil
+end
+
+local function remote_resolve(name, ipv6, timeout)
     local qtype = ipv6 and QTYPE.AAAA or QTYPE.A
-    local name = name:lower()
 
     local ret = query_cache(qtype, name)
     if ret then
@@ -308,7 +413,7 @@ local function dns_resolve(name, ipv6, timeout)
         return nil, exception("malformed packet")
     end
 
-    ok, question,left = pcall(unpack_question, resp, left)
+    ok, question,left = xpcall(unpack_question, debug.traceback, resp, left)
     if not ok then
         return nil, exception(question)
     end
@@ -320,14 +425,14 @@ local function dns_resolve(name, ipv6, timeout)
     local answer
     local answers = {}
     for i=1, answer_header.ancount do
-        ok, answer, left = pcall(unpack_answer, resp, left)
+        ok, answer, left = xpcall(unpack_answer, debug.traceback, resp, left)
         if not ok then
             return nil, exception(answer)
         end
         -- only extract qtype address
         if answer.atype == qtype then
             local ip
-            ok, ip = pcall(unpack_rdata, qtype, answer.rdata)
+            ok, ip = xpcall(unpack_rdata, debug.traceback, qtype, answer.rdata)
             if not ok then
                 return nil, exception(ip)
             end
@@ -343,7 +448,16 @@ local function dns_resolve(name, ipv6, timeout)
     return answers
 end
 
-local dns = {}
+local function dns_resolve(name, ipv6, timeout)
+    local name = name:lower()
+    local answers = local_resolve(name, ipv6)
+    if answers then
+        return answers
+    end
+
+    return remote_resolve(name, ipv6, timeout)
+end
+
 -- set your preferred dns server or use default
 function dns.set_server(host, port)
     dns_host = host
@@ -351,15 +465,18 @@ function dns.set_server(host, port)
 end
 
 function dns.resolve(name, ipv6, timeout)
-    if not is_valid_hostname(name) then
-        local ip = socket.normalize_ip(name, ipv6)
-        if ip then
-            return {ip}
+    local ntype = guess_name_type(name)
+    if ntype ~= "hostname" then
+        if (ipv6 and name == "ipv4") or (not ipv6 and name=="ipv6") then
+            return nil, exception("illegal ip address")
         end
+        return {name}
+    end
+
+    if not is_valid_hostname(name) then
         return nil, exception("illegal name")
     end
     return dns_resolve(name, ipv6, timeout)
 end
 
 return dns
-
