@@ -39,9 +39,14 @@ endmacro()
 
 # levent.module
 set(CSOURCE src/lua-socket.c src/lua-errno.c src/lua-levent.c src/lua-ev.c src/lua-http-parser.c deps/http-parser/http_parser.c)
+set(CMONGO cext/lua-mongo.c)
+set(CBSON  cext/lua-bson.c)
 
 IF(NOT WIN32)
     add_lua_library(levent ${CSOURCE})
+    # ignore compile warning: incompatible-pointer-types
+    target_compile_options(levent PRIVATE -Wno-incompatible-pointer-types)
+
     target_link_libraries(levent ev)
     add_custom_command(TARGET levent
         PRE_BUILD
