@@ -10,7 +10,7 @@ local class   = require "levent.class"
 local hub     = require "levent.hub"
 local timeout = require "levent.timeout"
 
-local closed_socket = setmetatable({}, {__index = function(t, key)
+local closed_socket = setmetatable({_closed = true}, {__index = function(t, key)
     if key == "send" or key == "recv" or key=="sendto" or key == "recvfrom" or key == "accept" then
         return function(...)
             return nil, errno.EBADF
@@ -114,6 +114,10 @@ end
 
 function Socket:_recv(func, ...)
     while true do
+        if self.cobj._closed then
+            return ""
+        end
+
         local data, err = func(self.cobj, ...)
         if data then
             return data
@@ -142,6 +146,10 @@ end
 
 function Socket:_send(func, ...)
     while true do
+        if self.cobj._closed then
+            return 0
+        end
+
         local nwrite, err = func(self.cobj, ...)
         if nwrite then
             return nwrite
